@@ -1,0 +1,54 @@
+size:
+  min_accept_mm: 35.0
+  max_accept_mm: 70.0
+  accepted_grades:
+  - Medium
+  - Large
+  grades:
+  - name: Small
+    max: 35.0
+  - name: Medium
+    max: 50.0
+  - name: Large
+    max: 70.0
+  - name: Oversize
+    max: 10000.0
+calibration:
+  pixels_per_mm: 4.35
+  confirmed: true
+  frame_width_px: 640
+  calibrated_at: '2026-09-30'
+grading:
+  min_quality_score: 75
+  min_confidence: 0.3
+  quality_grades:
+  - name: A+
+    min_score: 95
+  - name: A
+    min_score: 90
+  - name: B+
+    min_score: 85
+  - name: B
+    min_score: 75
+  - name: Below B
+    min_score: 0
+  accepted_quality_grades:
+  - A+
+  - A
+  - B+
+  - B
+  weights:
+    base: 100
+    rotten_penalty: 60
+    sprouted_penalty: 50
+    damaged_penalty: 40
+    low_conf_penalty: 15
+    borderline_size_penalty: 10
+    multi_defect_penalty: 10
+classes:
+- healthy_onion
+- rotten_onion
+- sprouted_onion
+- damaged_onion
+- sprout
+- reference
