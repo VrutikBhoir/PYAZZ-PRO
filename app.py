@@ -214,6 +214,7 @@ class LiveInspectionState:
                 box for box in boxes if box["label"] in CONDITION_BY_CLASS
             ]
             for result, box in zip(results, onion_boxes):
+                box["result"] = result
                 best_record = None
                 best_overlap = 0.25
                 for record in self._session_records:
@@ -336,21 +337,76 @@ def make_video_frame_callback(
 
             live_state.schedule_inference(get_model_executor(), run_inference)
             annotated_frame = image_array.copy()
+            onion_index = 0
             for box in live_state.current_boxes():
+                if box["label"] not in CONDITION_BY_CLASS:
+                    continue
+                result = box.get("result")
+                if result is None:
+                    continue
+                onion_index += 1
                 x1, y1, x2, y2 = (int(round(value)) for value in box["coords"])
-                color = (48, 145, 89) if box["label"] in CONDITION_BY_CLASS else (226, 151, 51)
+                color = (48, 145, 89) if result.decision == "CHOOSE" else (181, 71, 55)
                 cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), color, 2)
-                label = f"{box['label'].replace('_', ' ')} {box['confidence']:.0%}"
-                cv2.putText(
-                    annotated_frame,
-                    label,
-                    (x1, max(20, y1 - 8)),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.55,
-                    color,
-                    2,
-                    cv2.LINE_AA,
+                diameter = (
+                    f"{result.diameter_mm:.1f} mm"
+                    if result.diameter_mm is not None
+                    else "Unknown size"
                 )
+                overlay_lines = [
+                    f"Onion {onion_index}: {result.condition} | {diameter} | {result.size_grade}",
+                    f"Quality {result.quality_score}/100 ({result.quality_grade}) | Confidence {result.confidence:.0%}",
+                    f"Decision: {result.decision}",
+                ]
+
+                font = cv2.FONT_HERSHEY_SIMPLEX
+                font_scale = 0.42
+                thickness = 1
+                panel_x = max(0, min(x1, annotated_frame.shape[1] - 200))
+                max_text_width = max(160, min(440, annotated_frame.shape[1] - panel_x - 12))
+                wrapped_lines = []
+                for text in overlay_lines:
+                    current_line = ""
+                    for word in text.split():
+                        candidate = f"{current_line} {word}".strip()
+                        text_width = cv2.getTextSize(
+                            candidate, font, font_scale, thickness
+                        )[0][0]
+                        if current_line and text_width > max_text_width:
+                            wrapped_lines.append(current_line)
+                            current_line = word
+                        else:
+                            current_line = candidate
+                    if current_line:
+                        wrapped_lines.append(current_line)
+
+                line_height = 17
+                panel_height = len(wrapped_lines) * line_height + 12
+                panel_y = y1 - panel_height - 6
+                if panel_y < 0:
+                    panel_y = min(y2 + 6, annotated_frame.shape[0] - panel_height)
+                panel_y = max(0, panel_y)
+                panel_width = min(
+                    max_text_width + 12,
+                    annotated_frame.shape[1] - panel_x,
+                )
+                panel = annotated_frame[
+                    panel_y : panel_y + panel_height,
+                    panel_x : panel_x + panel_width,
+                ]
+                dark_panel = np.zeros_like(panel)
+                cv2.addWeighted(dark_panel, 0.72, panel, 0.28, 0, panel)
+                for line_index, text in enumerate(wrapped_lines):
+                    cv2.putText(
+                        annotated_frame,
+                        text,
+                        (panel_x + 6, panel_y + 17 + line_index * line_height),
+                        font,
+                        font_scale,
+                        (255, 255, 255),
+                        thickness,
+                        cv2.LINE_AA,
+                    )
             return av.VideoFrame.from_ndarray(annotated_frame, format="rgb24")
         except Exception as error:
             live_state.publish_error(str(error))
@@ -451,7 +507,6 @@ def render_result(result, index: int) -> None:
     decision_class = "decision-yes" if result.decision == "CHOOSE" else "decision-no"
     decision_label = "CHOOSE" if result.decision == "CHOOSE" else "DO NOT CHOOSE"
     size = f"{result.diameter_mm:.1f} mm" if result.diameter_mm is not None else "Unknown"
-    reason = " · ".join(result.reasons) if result.reasons else "Meets current quality rules"
     st.markdown(
         f"""
         <div class="result-card">
@@ -467,31 +522,10 @@ def render_result(result, index: int) -> None:
             <div><div class="result-stat-label">Confidence</div><div class="result-stat-value">{result.confidence:.0%}</div></div>
             <div><div class="result-stat-label">Quality score</div><div class="result-stat-value">{result.quality_score}/100</div></div>
           </div>
-          <div class="reason">{reason}</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
-
-
-@st.fragment(run_every=0.75)
-def render_live_results(live_state: LiveInspectionState) -> None:
-    snapshot = live_state.snapshot()
-    if snapshot["error"]:
-        st.error(f"Live detection error: {snapshot['error']}")
-        return
-    if snapshot["updated_at"] is None:
-        st.info(snapshot["status"] or "Waiting for live camera frames...")
-        return
-    if snapshot["unmatched_sprout"]:
-        st.warning("A sprout was detected without an overlapping whole-onion box.")
-    results = snapshot["results"] or []
-    st.caption(f"Live prediction · updated {snapshot['updated_at']}")
-    if not results:
-        st.info("No whole onions detected in the current frame.")
-        return
-    for index, result in enumerate(results, start=1):
-        render_result(result, index)
 
 
 def render_inspection_report(
@@ -557,6 +591,10 @@ if st.session_state.get("settings_config_signature") != config_signature:
         config_signature[0] if config_signature[1] else None
     )
     st.session_state["settings_config_signature"] = config_signature
+st.session_state["min_confidence"] = min(
+    1.0,
+    max(0.5, float(st.session_state["min_confidence"])),
+)
 st.session_state.setdefault("inspection_results", [])
 st.session_state.setdefault("annotated_image", None)
 st.session_state.setdefault("annotated_uploads", [])
@@ -623,12 +661,12 @@ with st.sidebar:
     min_accept = st.number_input("Minimum accepted diameter (mm)", 1.0, 500.0, key="min_accept_mm")
     max_accept = st.number_input("Maximum accepted diameter (mm)", 1.0, 500.0, key="max_accept_mm")
     min_confidence = st.slider(
-        "Minimum decision confidence",
-        min_value=0.0,
+        "Minimum onion detection confidence",
+        min_value=0.5,
         max_value=1.0,
         step=0.05,
         key="min_confidence",
-        help="Detections below this threshold are rejected by the rules engine.",
+        help="Higher values reduce off-target predictions but may ignore uncertain onions.",
     )
     if st.button("Confirm camera calibration", use_container_width=True):
         st.session_state["confirmed_pixels_per_mm"] = float(pixels_per_mm)
@@ -710,7 +748,7 @@ with capture_col:
                 video_frame_callback=make_video_frame_callback(
                     st.session_state["live_inspection_state"],
                     live_config,
-                    max(0.15, float(min_confidence) * 0.5),
+                    float(min_confidence),
                     calibration_confirmed,
                     model_future,
                 ),
@@ -773,7 +811,9 @@ with capture_col:
 with output_col:
     if source == "Live camera":
         if st.session_state["live_camera_active"]:
-            render_live_results(st.session_state["live_inspection_state"])
+            live_error = st.session_state["live_inspection_state"].snapshot()["error"]
+            if live_error:
+                st.error(f"Live detection error: {live_error}")
         elif st.session_state["live_report_results"] is not None:
             report_config = dict(config)
             report_config["calibration"] = {
@@ -815,7 +855,7 @@ with output_col:
                             annotated, detections, image_unmatched_sprout, _ = analyze_image(
                                 source_image,
                                 active_config,
-                                max(0.15, float(min_confidence) * 0.5),
+                                float(min_confidence),
                                 calibration_confirmed,
                             )
                             batch_annotated.append((uploaded_file.name, annotated))
